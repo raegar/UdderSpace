@@ -324,13 +324,13 @@ func draw_cow(cow: Dictionary) -> void:
 	draw_set_transform(p, angle, Vector2(s, s))
 	var body := Color("#f4eee2")
 	var dark := Color("#252733")
-	draw_ellipse(Vector2.ZERO, Vector2(27, 16), body)
+	draw_custom_ellipse(Vector2.ZERO, Vector2(27, 16), body)
 	draw_circle(Vector2(25, -5), 12, body)
 	draw_circle(Vector2(31, -4), 5, Color("#e7b7a8"))
 	draw_colored_polygon(PackedVector2Array([Vector2(17, -14), Vector2(12, -24), Vector2(22, -17)]), dark)
 	draw_colored_polygon(PackedVector2Array([Vector2(31, -14), Vector2(38, -23), Vector2(37, -12)]), dark)
-	draw_ellipse(Vector2(-10, -5), Vector2(9, 7), dark)
-	draw_ellipse(Vector2(9, 7), Vector2(7, 6), dark)
+	draw_custom_ellipse(Vector2(-10, -5), Vector2(9, 7), dark)
+	draw_custom_ellipse(Vector2(9, 7), Vector2(7, 6), dark)
 	var leg_kick := sin(cow.phase) * (7 if cow.airborne else 2)
 	draw_line(Vector2(-15, 12), Vector2(-16 + leg_kick, 27), dark, 5)
 	draw_line(Vector2(13, 12), Vector2(14 - leg_kick, 27), dark, 5)
@@ -340,7 +340,7 @@ func draw_cow(cow: Dictionary) -> void:
 		draw_circle(Vector2(28, -8), 5, Color.WHITE, false, 1.5)
 	draw_set_transform(Vector2.ZERO)
 
-func draw_ellipse(center: Vector2, radii: Vector2, color: Color) -> void:
+func draw_custom_ellipse(center: Vector2, radii: Vector2, color: Color) -> void:
 	var points := PackedVector2Array()
 	for i in 24:
 		var a := TAU * i / 24.0
