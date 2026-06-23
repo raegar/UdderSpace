@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(taskkill //IM \"Godot_v4.7-stable_win64.exe\" //F)",
+      "Bash(\"/c/Users/XRP3/Downloads/Godot_v4.7-stable_win64.exe/Godot_v4.7-stable_win64.exe\" --path \"c:/UdderSpace\" res://main.tscn)",
+      "Bash(\"/c/Users/XRP3/Downloads/Godot_v4.7-stable_win64.exe/Godot_v4.7-stable_win64.exe\" --path \"c:/UdderSpace\" --main-pack \"\" -- res://main.tscn)"
+    ]
+  }
+}
