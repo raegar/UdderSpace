@@ -12,13 +12,20 @@ var state := GameState.TITLE
 var ufo_pos := Vector2(W * 0.5, 170.0)
 var ufo_vel := Vector2.ZERO
 var cows: Array[Dictionary] = []
+var pigs: Array[Dictionary] = []
 var particles: Array[Dictionary] = []
 var stars: Array[Vector2] = []
 var clouds: Array[Dictionary] = []
+var birds: Array[Dictionary] = []
+var helicopters: Array[Dictionary] = []
+var farmers: Array[Dictionary] = []
+var bullets: Array[Dictionary] = []
+var heli_timer := 0.0
+var farmer_timer := 0.0
 var score := 0
 var combo := 0
 var best_combo := 0
-var time_left := 60.0
+var time_left := 30.0
 var beam_energy := 100.0
 var beam_on := false
 var screen_shake := 0.0
@@ -38,6 +45,14 @@ func _ready() -> void:
 			"speed": rng.randf_range(5, 13),
 			"scale": rng.randf_range(0.7, 1.4)
 		})
+	for i in 8:
+		var d := 1.0 if rng.randf() < 0.5 else -1.0
+		birds.append({
+			"pos": Vector2(rng.randf_range(0, W), rng.randf_range(60, 300)),
+			"speed": rng.randf_range(38, 80),
+			"dir": d,
+			"flap": rng.randf_range(0, TAU)
+		})
 	queue_redraw()
 
 func start_game() -> void:
@@ -45,16 +60,24 @@ func start_game() -> void:
 	ufo_pos = Vector2(W * 0.5, 155)
 	ufo_vel = Vector2.ZERO
 	cows.clear()
+	pigs.clear()
+	helicopters.clear()
+	farmers.clear()
+	bullets.clear()
 	particles.clear()
+	heli_timer = 8.0
+	farmer_timer = 5.0
 	score = 0
 	combo = 0
 	best_combo = 0
 	captured = 0
-	time_left = 60.0
+	time_left = 30.0
 	beam_energy = 100.0
 	spawn_timer = 0.0
 	for i in 8:
 		spawn_cow(90.0 + i * 135.0 + rng.randf_range(-30, 30))
+	for i in 4:
+		spawn_pig()
 
 func spawn_cow(x := -1.0) -> void:
 	if x < 0:
@@ -67,7 +90,22 @@ func spawn_cow(x := -1.0) -> void:
 		"fear": 0.0,
 		"airborne": false,
 		"captured": false,
-		"size": rng.randf_range(0.88, 1.1)
+		"size": rng.randf_range(0.88, 1.1),
+		"body_color": [Color("#f4eee2"), Color("#c47a4a"), Color("#d4b97a"), Color("#b0cca0"), Color("#c8c8c8"), Color("#e8a0b0")].pick_random()
+	})
+
+func spawn_pig(x := -1.0) -> void:
+	if x < 0:
+		x = rng.randf_range(65, W - 65)
+	pigs.append({
+		"pos": Vector2(x, GROUND_Y - 14),
+		"vel": Vector2(rng.randf_range(-18, 18), 0),
+		"dir": -1.0 if rng.randf() < 0.5 else 1.0,
+		"phase": rng.randf_range(0, TAU),
+		"fear": 0.0,
+		"airborne": false,
+		"captured": false,
+		"size": rng.randf_range(0.85, 1.05)
 	})
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -88,6 +126,13 @@ func _process(delta: float) -> void:
 		cloud.pos.x += cloud.speed * delta
 		if cloud.pos.x > W + 140:
 			cloud.pos.x = -140
+	for bird in birds:
+		bird.pos.x += bird.speed * bird.dir * delta
+		bird.flap += delta * 6.0
+		if bird.pos.x > W + 40:
+			bird.pos.x = -40
+		elif bird.pos.x < -40:
+			bird.pos.x = W + 40
 	if state == GameState.PLAYING:
 		update_game(delta)
 	update_particles(delta)
@@ -123,13 +168,50 @@ func update_game(delta: float) -> void:
 	if spawn_timer <= 0 and cows.size() < 10:
 		spawn_cow()
 		spawn_timer = rng.randf_range(1.5, 3.0)
+	if pigs.size() < 5 and rng.randf() < delta * 0.3:
+		spawn_pig()
 
 	for cow in cows:
 		update_cow(cow, delta)
+	for pig in pigs:
+		update_pig(pig, delta)
 
 	for i in range(cows.size() - 1, -1, -1):
 		if cows[i].captured:
 			cows.remove_at(i)
+	for i in range(pigs.size() - 1, -1, -1):
+		if pigs[i].captured:
+			pigs.remove_at(i)
+
+	heli_timer -= delta
+	if heli_timer <= 0:
+		spawn_helicopter()
+		heli_timer = rng.randf_range(6.0, 12.0)
+	for heli in helicopters:
+		update_helicopter(heli, delta)
+	for i in range(helicopters.size() - 1, -1, -1):
+		if helicopters[i].done:
+			helicopters.remove_at(i)
+
+	farmer_timer -= delta
+	if farmer_timer <= 0 and farmers.size() < 4:
+		spawn_farmer()
+		farmer_timer = rng.randf_range(5.0, 10.0)
+	for farmer in farmers:
+		update_farmer(farmer, delta)
+	for i in range(bullets.size() - 1, -1, -1):
+		var b: Dictionary = bullets[i]
+		b.pos += b.vel * delta
+		b.life -= delta
+		if b.life <= 0:
+			bullets.remove_at(i)
+			continue
+		if b.pos.distance_to(ufo_pos) < 38:
+			beam_energy = maxf(0, beam_energy - 28)
+			screen_shake = 5.0
+			for j in 8:
+				add_particle(b.pos + Vector2(rng.randf_range(-12, 12), 0), Color("#ff9933"), "spark")
+			bullets.remove_at(i)
 
 func update_cow(cow: Dictionary, delta: float) -> void:
 	cow.phase += delta * 5.0
@@ -184,6 +266,118 @@ func update_cow(cow: Dictionary, delta: float) -> void:
 	elif not in_beam and cow.airborne and cow.pos.y >= GROUND_Y - 17:
 		combo = 0
 
+func update_pig(pig: Dictionary, delta: float) -> void:
+	pig.phase += delta * 4.0
+	var offset: Vector2 = pig.pos - ufo_pos
+	var in_beam: bool = beam_on and pig.pos.y > ufo_pos.y and absf(offset.x) < beam_width_at(pig.pos.y) and offset.length() < BEAM_RANGE
+
+	if in_beam:
+		pig.airborne = true
+		pig.fear = minf(1.0, pig.fear + delta * 4.0)
+		var pull := Vector2((ufo_pos.x - pig.pos.x) * 4.3, -245.0)
+		pig.vel = pig.vel.lerp(pull, 1.0 - exp(-delta * 3.4))
+		pig.vel.y -= delta * 100.0
+		if rng.randf() < delta * 8.0:
+			add_particle(pig.pos + Vector2(rng.randf_range(-12, 12), 10), Color("#ffaec9"), "spark")
+	else:
+		pig.fear = maxf(0.0, pig.fear - delta * 2.0)
+		if pig.airborne:
+			pig.vel.y += 420.0 * delta
+		else:
+			pig.vel.x = move_toward(pig.vel.x, pig.dir * 20.0, delta * 18.0)
+			if rng.randf() < delta * 0.3:
+				pig.dir *= -1.0
+
+	pig.pos += pig.vel * delta
+	if pig.pos.y >= GROUND_Y - 14:
+		if pig.airborne and pig.vel.y > 170:
+			for j in 5:
+				add_particle(pig.pos + Vector2(rng.randf_range(-14, 14), 12), Color("#e8a0b0"), "dust")
+		pig.pos.y = GROUND_Y - 14
+		pig.vel.y = 0
+		pig.airborne = false
+	if pig.pos.x < 35:
+		pig.pos.x = 35
+		pig.dir = 1.0
+	if pig.pos.x > W - 35:
+		pig.pos.x = W - 35
+		pig.dir = -1.0
+
+	if pig.pos.distance_to(ufo_pos) < 48:
+		pig.captured = true
+		captured += 1
+		combo += 1
+		best_combo = maxi(best_combo, combo)
+		var points := 100 * combo
+		score += points
+		time_left = minf(99.0, time_left + 2.0)
+		beam_energy = minf(100, beam_energy + 22)
+		screen_shake = 8.0
+		flash = 0.35
+		for j in 18:
+			add_particle(ufo_pos + Vector2(rng.randf_range(-35, 35), 15), Color("#ffaec9"), "burst")
+	elif not in_beam and pig.airborne and pig.pos.y >= GROUND_Y - 15:
+		combo = 0
+
+func spawn_farmer() -> void:
+	farmers.append({
+		"pos": Vector2(rng.randf_range(80, W - 80), GROUND_Y - 20),
+		"vel": Vector2.ZERO,
+		"dir": 1.0 if rng.randf() < 0.5 else -1.0,
+		"phase": rng.randf_range(0, TAU),
+		"shoot_timer": rng.randf_range(1.5, 3.5)
+	})
+
+func update_farmer(farmer: Dictionary, delta: float) -> void:
+	farmer.phase += delta * 4.0
+	farmer.vel.x = move_toward(farmer.vel.x, farmer.dir * 30.0, delta * 40.0)
+	if rng.randf() < delta * 0.4:
+		farmer.dir *= -1.0
+	farmer.pos += farmer.vel * delta
+	farmer.pos.x = clampf(farmer.pos.x, 40, W - 40)
+	if farmer.pos.x <= 41 or farmer.pos.x >= W - 41:
+		farmer.dir *= -1.0
+
+	farmer.shoot_timer -= delta
+	if farmer.shoot_timer <= 0 and state == GameState.PLAYING:
+		farmer.shoot_timer = rng.randf_range(2.0, 4.5)
+		var aim: Vector2 = (ufo_pos - (farmer.pos as Vector2)).normalized()
+		bullets.append({
+			"pos": farmer.pos + Vector2(0, -28),
+			"vel": aim * 320.0,
+			"life": 2.5
+		})
+		for j in 4:
+			add_particle(farmer.pos + Vector2(rng.randf_range(-6, 6), -28), Color("#ff9933"), "spark")
+
+func spawn_helicopter() -> void:
+	var from_left := rng.randf() < 0.5
+	helicopters.append({
+		"pos": Vector2(-80.0 if from_left else W + 80.0, rng.randf_range(110, 290)),
+		"vel": Vector2(185.0 if from_left else -185.0, 0.0),
+		"rotor": 0.0,
+		"done": false
+	})
+
+func update_helicopter(heli: Dictionary, delta: float) -> void:
+	heli.rotor += delta * 18.0
+	heli.pos += heli.vel * delta
+	if heli.pos.x < -120 or heli.pos.x > W + 120:
+		heli.done = true
+		return
+	for cow in cows:
+		if cow.airborne and cow.pos.distance_to(heli.pos) < 65:
+			cow.vel = Vector2(heli.vel.x * 0.4, 180.0)
+			cow.airborne = true
+			for j in 6:
+				add_particle(cow.pos + Vector2(rng.randf_range(-20, 20), 0), Color("#a0c8ff"), "dust")
+	for pig in pigs:
+		if pig.airborne and pig.pos.distance_to(heli.pos) < 65:
+			pig.vel = Vector2(heli.vel.x * 0.4, 180.0)
+			pig.airborne = true
+			for j in 6:
+				add_particle(pig.pos + Vector2(rng.randf_range(-20, 20), 0), Color("#a0c8ff"), "dust")
+
 func beam_width_at(y: float) -> float:
 	var t := clampf((y - ufo_pos.y) / BEAM_RANGE, 0, 1)
 	return lerpf(30, 125, t)
@@ -218,6 +412,14 @@ func _draw() -> void:
 	draw_background()
 	for cow in cows:
 		draw_cow(cow)
+	for pig in pigs:
+		draw_pig(pig)
+	for heli in helicopters:
+		draw_helicopter(heli)
+	for farmer in farmers:
+		draw_farmer(farmer)
+	for b in bullets:
+		draw_bullet(b)
 	if state == GameState.PLAYING and beam_on:
 		draw_beam()
 	draw_ufo(ufo_pos, state == GameState.TITLE)
@@ -241,10 +443,17 @@ func draw_background() -> void:
 	for i in stars.size():
 		var twinkle := 0.45 + sin(title_bob * 2.0 + i * 1.7) * 0.3
 		draw_circle(stars[i], 2.0 if i % 7 == 0 else 1.0, Color(1, 0.95, 0.75, twinkle))
-	draw_circle(Vector2(980, 108), 48, Color("#f5dfb1"))
-	draw_circle(Vector2(960, 93), 44, Color("#182348"))
+	for i in 12:
+		var a := TAU * i / 12.0
+		var inner := Vector2(cos(a), sin(a)) * 54
+		var outer := Vector2(cos(a), sin(a)) * 72
+		draw_line(Vector2(980, 108) + inner, Vector2(980, 108) + outer, Color("#ffe066", 0.85), 3)
+	draw_circle(Vector2(980, 108), 48, Color("#ffe84a"))
+	draw_circle(Vector2(980, 108), 38, Color("#fff176"))
 	for cloud in clouds:
 		draw_cloud(cloud.pos, cloud.scale)
+	for bird in birds:
+		draw_bird(bird)
 	draw_colored_polygon(PackedVector2Array([
 		Vector2(0, 475), Vector2(145, 370), Vector2(295, 475),
 		Vector2(455, 345), Vector2(650, 475), Vector2(850, 380),
@@ -312,7 +521,7 @@ func draw_ufo(pos: Vector2, title_mode := false) -> void:
 	for i in 5:
 		var lx := -40 + i * 20
 		var lc := Color("#dfff58") if (int(title_bob * 8) + i) % 2 == 0 else Color("#ffcb4f")
-		draw_circle(p + Vector2(lx, 10), 4.5, lc)
+		draw_circle(p + Vector2(lx, 10), 2.5, lc)
 	draw_line(p + Vector2(-26, 22), p + Vector2(26, 22), Color("#c9ff6a"), 4)
 
 func draw_cow(cow: Dictionary) -> void:
@@ -322,7 +531,7 @@ func draw_cow(cow: Dictionary) -> void:
 	if cow.airborne:
 		angle += sin(cow.phase) * 0.12
 	draw_set_transform(p, angle, Vector2(s, s))
-	var body := Color("#f4eee2")
+	var body: Color = cow.body_color
 	var dark := Color("#252733")
 	draw_custom_ellipse(Vector2.ZERO, Vector2(27, 16), body)
 	draw_circle(Vector2(25, -5), 12, body)
@@ -346,6 +555,89 @@ func draw_custom_ellipse(center: Vector2, radii: Vector2, color: Color) -> void:
 		var a := TAU * i / 24.0
 		points.append(center + Vector2(cos(a) * radii.x, sin(a) * radii.y))
 	draw_colored_polygon(points, color)
+
+func draw_pig(pig: Dictionary) -> void:
+	var p: Vector2 = pig.pos
+	var s: float = pig.size
+	var angle := clampf(pig.vel.x / 500.0, -0.3, 0.3)
+	if pig.airborne:
+		angle += sin(pig.phase) * 0.1
+	draw_set_transform(p, angle, Vector2(s, s))
+	var pink := Color("#f4a0b8")
+	var dark_pink := Color("#d4607a")
+	var dark := Color("#252733")
+	draw_custom_ellipse(Vector2.ZERO, Vector2(22, 15), pink)
+	draw_circle(Vector2(20, -4), 11, pink)
+	draw_circle(Vector2(26, -2), 7, Color("#f8c0ce"))
+	draw_circle(Vector2(24, -3), 2.5, dark)
+	draw_circle(Vector2(28, -1), 2.5, dark)
+	draw_colored_polygon(PackedVector2Array([Vector2(13, -13), Vector2(8, -22), Vector2(18, -15)]), dark_pink)
+	draw_colored_polygon(PackedVector2Array([Vector2(26, -12), Vector2(32, -21), Vector2(32, -10)]), dark_pink)
+	var leg_kick := sin(pig.phase) * (6 if pig.airborne else 2)
+	draw_line(Vector2(-10, 10), Vector2(-11 + leg_kick, 24), dark, 5)
+	draw_line(Vector2(10, 10), Vector2(11 - leg_kick, 24), dark, 5)
+	var tail_x := -22.0
+	for i in 4:
+		var ta: float = i * 0.9 + (pig.phase as float) * 0.5
+		draw_circle(Vector2(tail_x - i * 3, -2 + sin(ta) * 4), 2.5, dark_pink)
+	if pig.fear > 0.2:
+		draw_circle(Vector2(24, -3), 5, Color.WHITE, false, 1.5)
+	draw_set_transform(Vector2.ZERO)
+
+func draw_bird(bird: Dictionary) -> void:
+	var p: Vector2 = bird.pos
+	var wing := sin(bird.flap) * 5.0
+	var c := Color(0.15, 0.12, 0.1, 0.7)
+	draw_line(p, p + Vector2(-10 * bird.dir, -wing), c, 2)
+	draw_line(p, p + Vector2(10 * bird.dir, -wing), c, 2)
+
+func draw_helicopter(heli: Dictionary) -> void:
+	var p: Vector2 = heli.pos
+	var dir := signf(heli.vel.x)
+	var body_color := Color("#e84040")
+	var dark := Color("#7a1010")
+	draw_custom_ellipse(p + Vector2(0, 2), Vector2(28, 11), body_color)
+	draw_custom_ellipse(p + Vector2(22 * dir, 4), Vector2(14, 6), dark)
+	draw_rect(Rect2(p + Vector2(-4, -16), Vector2(8, 16)), Color("#888888"), true)
+	for i in 3:
+		var ra: float = (heli.rotor as float) + TAU * i / 3.0
+		draw_line(p + Vector2(cos(ra) * 2, -16), p + Vector2(cos(ra) * 32, -16 + sin(ra) * 6), Color("#cccccc", 0.85), 2)
+	draw_line(p + Vector2(-28 * dir, 6), p + Vector2(-28 * dir, 14), dark, 3)
+	draw_line(p + Vector2(-28 * dir, 14), p + Vector2(-22 * dir, 14), dark, 3)
+	draw_circle(p + Vector2(18 * dir, -2), 5, Color("#a0d8ff", 0.6))
+
+func draw_farmer(farmer: Dictionary) -> void:
+	var p: Vector2 = farmer.pos
+	var d: float = farmer.dir
+	var leg := sin(farmer.phase) * 4.0 * absf(farmer.vel.x) / 31.0
+	var skin := Color("#f5c89a")
+	var denim := Color("#3a5fa0")
+	var shirt := Color("#d04020")
+	var hat := Color("#8b6520")
+	draw_circle(p + Vector2(0, -30), 9, skin)
+	draw_colored_polygon(PackedVector2Array([
+		p + Vector2(-4, -34), p + Vector2(4, -34),
+		p + Vector2(6, -40), p + Vector2(-6, -40)
+	]), hat)
+	draw_rect(Rect2(p + Vector2(-8, -41), Vector2(16, 3)), hat, true)
+	draw_colored_polygon(PackedVector2Array([
+		p + Vector2(-6, -21), p + Vector2(6, -21),
+		p + Vector2(7, -8), p + Vector2(-7, -8)
+	]), shirt)
+	draw_colored_polygon(PackedVector2Array([
+		p + Vector2(-6, -8), p + Vector2(6, -8),
+		p + Vector2(5, 8), p + Vector2(-5, 8)
+	]), denim)
+	draw_line(p + Vector2(-3, 8), p + Vector2(-4 + leg, 20), denim, 5)
+	draw_line(p + Vector2(3, 8), p + Vector2(4 - leg, 20), denim, 5)
+	var aim_dir := (ufo_pos - p).normalized()
+	var gun_base := p + Vector2(7 * d, -14)
+	draw_line(gun_base, gun_base + aim_dir * 22, Color("#555533"), 3)
+	draw_circle(gun_base + aim_dir * 22, 2.5, Color("#333322"))
+
+func draw_bullet(b: Dictionary) -> void:
+	draw_circle(b.pos, 3.5, Color("#ffcc44"))
+	draw_circle(b.pos, 2.0, Color("#ffffff", 0.8))
 
 func draw_particle(p: Dictionary) -> void:
 	var alpha: float = clampf(p.life / p.max_life, 0, 1)
