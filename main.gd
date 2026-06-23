@@ -6,7 +6,7 @@ const GROUND_Y := 535.0
 const UFO_SPEED := 430.0
 const BEAM_RANGE := 365.0
 
-enum GameState { TITLE, PLAYING, GAME_OVER }
+enum GameState { TITLE, PLAYING, LEVEL_COMPLETE, GAME_OVER }
 
 var state := GameState.TITLE
 var ufo_pos := Vector2(W * 0.5, 170.0)
@@ -28,6 +28,182 @@ var captured := 0
 var title_bob := 0.0
 var rng := RandomNumberGenerator.new()
 
+const PENTATONIC_HZ := [261.63, 293.66, 329.63, 392.0, 440.0, 523.25, 587.33, 659.25, 784.0, 880.0]
+const NOTE_COLORS := [Color("#ff6b6b"), Color("#ffa94d"), Color("#ffd43b"), Color("#69db7c"), Color("#4dabf7"), Color("#748ffc"), Color("#da77f2"), Color("#f783ac"), Color("#38d9a9"), Color("#fcc419")]
+var note_players: Array[AudioStreamPlayer] = []
+var note_spawn_counter := 0
+
+const LEVEL_TARGETS   := [4,    6,    9,    12,   16  ]
+const LEVEL_MAX_COWS  := [8,    9,    10,   10,   10  ]
+const LEVEL_SPEED     := [25.0, 36.0, 50.0, 65.0, 82.0]
+const LEVEL_DRAIN     := [25.0, 28.0, 32.0, 37.0, 44.0]
+const LEVEL_SPAWN_MIN := [1.5,  1.2,  0.9,  0.7,  0.5 ]
+const LEVEL_SPAWN_MAX := [3.0,  2.4,  1.8,  1.4,  1.1 ]
+var level := 1
+var level_captured := 0
+var level_complete_timer := 0.0
+
+var boss := {}
+var boss_active := false
+var boss_intro_timer := 0.0
+
+func generate_tone(frequency: float) -> AudioStreamWAV:
+	var sample_rate := 44100
+	var samples := int(sample_rate * 0.6)
+	var data := PackedByteArray()
+	data.resize(samples * 2)
+	for i in samples:
+		var t := float(i) / float(sample_rate)
+		var envelope := minf(1.0, t * 30.0) * exp(-t * 3.5)
+		var wave := sin(TAU * frequency * t) * 0.7 + sin(TAU * frequency * 2.0 * t) * 0.2 + sin(TAU * frequency * 3.0 * t) * 0.1
+		data.encode_s16(i * 2, clampi(int(28000.0 * wave * envelope), -32768, 32767))
+	var wav := AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.stereo = false
+	wav.mix_rate = sample_rate
+	wav.data = data
+	return wav
+
+func setup_audio() -> void:
+	for hz in PENTATONIC_HZ:
+		var player := AudioStreamPlayer.new()
+		player.stream = generate_tone(hz)
+		player.volume_db = -8.0
+		add_child(player)
+		note_players.append(player)
+
+func spawn_boss() -> void:
+	boss = {
+		"pos": Vector2(W * 0.88, GROUND_Y),
+		"vel": Vector2.ZERO,
+		"phase": 0.0,
+		"dir": -1.0,
+		"mouth_open": 0.0,
+		"hunger": 0
+	}
+	boss_active = true
+	boss_intro_timer = 3.5
+
+func update_boss(delta: float) -> void:
+	boss.phase = float(boss.phase) + delta * 4.5
+	boss_intro_timer = maxf(0.0, boss_intro_timer - delta)
+	var bpos: Vector2 = boss.pos
+	var bdir: float = float(boss.dir)
+
+	var nearest_dist := INF
+	var target_x := bpos.x
+	for cow in cows:
+		var cpos: Vector2 = cow.pos
+		var d := bpos.distance_to(cpos)
+		if d < nearest_dist:
+			nearest_dist = d
+			target_x = cpos.x
+
+	var speed := minf(210.0, 95.0 + float(boss.hunger) * 7.0)
+	var dx := target_x - bpos.x
+	if absf(dx) > 10:
+		bdir = 1.0 if dx > 0 else -1.0
+		boss.dir = bdir
+	var new_vx := move_toward(float(boss.vel.x), bdir * speed, delta * 95.0)
+	boss.vel = Vector2(new_vx, 0)
+	boss.pos = Vector2(clampf(bpos.x + new_vx * delta, 85, W - 85), bpos.y)
+
+	boss.mouth_open = minf(1.0, float(boss.mouth_open) + delta * (3.5 if nearest_dist < 170 else -2.2))
+	boss.mouth_open = maxf(0.0, boss.mouth_open)
+
+	var mouth_pos := Vector2(bpos.x + bdir * 72, bpos.y - 36)
+	for i in range(cows.size() - 1, -1, -1):
+		var cpos: Vector2 = cows[i].pos
+		if mouth_pos.distance_to(cpos) < 58:
+			for j in 16:
+				add_particle(cpos + Vector2(rng.randf_range(-24, 24), rng.randf_range(-20, 8)), Color("#cc1133"), "burst")
+			cows.remove_at(i)
+			boss.hunger = int(boss.hunger) + 1
+			boss.mouth_open = 1.0
+			screen_shake = 6.0
+
+func draw_boss() -> void:
+	var bpos: Vector2 = boss.pos
+	var bdir: float = float(boss.dir)
+	var ph: float = float(boss.phase)
+	var mo: float = float(boss.mouth_open)
+	var swing := sin(ph) * 11.0
+	var jaw := mo * 26.0
+
+	draw_custom_ellipse(Vector2(bpos.x, bpos.y + 6), Vector2(82, 13), Color(0, 0, 0, 0.35))
+	draw_set_transform(bpos, 0.0, Vector2(bdir, 1.0))
+
+	# Back spikes
+	for i in 6:
+		var sx := float(-28 + i * 11)
+		var tip_y := -98.0 - float(i % 3) * 9.0
+		draw_colored_polygon(PackedVector2Array([
+			Vector2(sx - 7, -74), Vector2(sx + 1, tip_y), Vector2(sx + 9, -74)
+		]), Color("#5a006a"))
+
+	# Body
+	draw_custom_ellipse(Vector2(0, -44), Vector2(54, 42), Color("#1a0828"))
+	draw_custom_ellipse(Vector2(-12, -58), Vector2(26, 14), Color("#2e0d45", 0.5))
+
+	# Legs
+	draw_line(Vector2(-32, -20), Vector2(-35 + swing, 4), Color("#120518"), 10)
+	draw_line(Vector2(-11, -16), Vector2(-11 - swing, 5), Color("#120518"), 10)
+	draw_line(Vector2(11, -16), Vector2(13 + swing, 5), Color("#120518"), 10)
+	draw_line(Vector2(32, -20), Vector2(35 - swing, 4), Color("#120518"), 10)
+	for lx: float in [-35.0, -11.0, 13.0, 35.0]:
+		draw_circle(Vector2(lx, 5), 7, Color("#120518"))
+
+	# Head
+	draw_circle(Vector2(55, -40), 40, Color("#250a3c"))
+
+	# Jaws
+	draw_custom_ellipse(Vector2(64, -52 - jaw * 0.5), Vector2(33, 17), Color("#3b1150"))
+	draw_custom_ellipse(Vector2(64, -28 + jaw * 0.5), Vector2(31, 15), Color("#3b1150"))
+
+	# Mouth interior
+	if mo > 0.05:
+		draw_custom_ellipse(Vector2(68, -40), Vector2(26.0 * mo + 3, 21.0 * mo + 3), Color("#7a0015"))
+		if mo > 0.5:
+			draw_custom_ellipse(Vector2(72, -32 + jaw * 0.35), Vector2(13, 8), Color("#cc1133"))
+
+	# Teeth
+	if mo > 0.2:
+		for t in 4:
+			var tx := 38.0 + float(t) * 12.0
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(tx - 4, -36 - jaw * 0.5),
+				Vector2(tx + 2,  -20 - jaw * 0.5),
+				Vector2(tx + 8, -36 - jaw * 0.5)
+			]), Color(0.9, 0.88, 0.78))
+		for t in 3:
+			var tx := 44.0 + float(t) * 13.0
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(tx - 3, -44 + jaw * 0.5),
+				Vector2(tx + 2,  -57 + jaw * 0.5),
+				Vector2(tx + 7, -44 + jaw * 0.5)
+			]), Color(0.88, 0.85, 0.72))
+
+	# Eyes
+	draw_circle(Vector2(42, -66), 17, Color(1.0, 0.1, 0.0, 0.35))
+	draw_circle(Vector2(42, -66), 13, Color("#ff1800"))
+	draw_circle(Vector2(42, -66), 8,  Color("#ff7200"))
+	draw_circle(Vector2(45, -66), 5,  Color(0.04, 0.0, 0.04))
+	draw_circle(Vector2(38, -71), 4,  Color(1.0, 0.9, 0.9, 0.45))
+
+	draw_set_transform(Vector2.ZERO)
+
+	# Name tag during intro
+	if boss_intro_timer > 0:
+		var alpha: float
+		if boss_intro_timer > 3.0:
+			alpha = (3.5 - boss_intro_timer) / 0.5
+		elif boss_intro_timer < 1.2:
+			alpha = boss_intro_timer / 1.2
+		else:
+			alpha = 1.0
+		draw_centered("MOOCHER  AWAKENS", H * 0.28, 34, Color(1.0, 0.22, 0.08, alpha))
+		draw_centered("PROTECT YOUR COWS", H * 0.28 + 44, 19, Color(1.0, 0.65, 0.3, alpha * 0.85))
+
 func _ready() -> void:
 	rng.randomize()
 	for i in 90:
@@ -38,23 +214,36 @@ func _ready() -> void:
 			"speed": rng.randf_range(5, 13),
 			"scale": rng.randf_range(0.7, 1.4)
 		})
+	setup_audio()
 	queue_redraw()
 
 func start_game() -> void:
+	level = 1
+	score = 0
+	combo = 0
+	best_combo = 0
+	captured = 0
+	boss_active = false
+	start_level()
+
+func start_level() -> void:
 	state = GameState.PLAYING
 	ufo_pos = Vector2(W * 0.5, 155)
 	ufo_vel = Vector2.ZERO
 	cows.clear()
 	particles.clear()
-	score = 0
-	combo = 0
-	best_combo = 0
-	captured = 0
-	time_left = 60.0
+	level_captured = 0
+	time_left = 45.0
 	beam_energy = 100.0
+	beam_on = false
 	spawn_timer = 0.0
+	note_spawn_counter = 0
+	combo = 0
+	boss_active = false
 	for i in 8:
 		spawn_cow(90.0 + i * 135.0 + rng.randf_range(-30, 30))
+	if level == 5:
+		spawn_boss()
 
 func spawn_cow(x := -1.0) -> void:
 	if x < 0:
@@ -67,19 +256,26 @@ func spawn_cow(x := -1.0) -> void:
 		"fear": 0.0,
 		"airborne": false,
 		"captured": false,
-		"size": rng.randf_range(0.88, 1.1)
+		"size": rng.randf_range(0.88, 1.1),
+		"note": note_spawn_counter % PENTATONIC_HZ.size()
 	})
+	note_spawn_counter += 1
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode in [KEY_ENTER, KEY_SPACE]:
-			if state != GameState.PLAYING:
+			if state == GameState.LEVEL_COMPLETE:
+				level_complete_timer = 0.0
+				get_viewport().set_input_as_handled()
+			elif state != GameState.PLAYING:
 				start_game()
 				get_viewport().set_input_as_handled()
 		elif event.keycode == KEY_ESCAPE and state == GameState.PLAYING:
 			state = GameState.TITLE
 	if event is InputEventMouseButton and event.pressed:
-		if state != GameState.PLAYING:
+		if state == GameState.LEVEL_COMPLETE:
+			level_complete_timer = 0.0
+		elif state != GameState.PLAYING:
 			start_game()
 
 func _process(delta: float) -> void:
@@ -90,6 +286,14 @@ func _process(delta: float) -> void:
 			cloud.pos.x = -140
 	if state == GameState.PLAYING:
 		update_game(delta)
+	elif state == GameState.LEVEL_COMPLETE:
+		level_complete_timer -= delta
+		if level_complete_timer <= 0:
+			level += 1
+			if level > 5:
+				state = GameState.GAME_OVER
+			else:
+				start_level()
 	update_particles(delta)
 	screen_shake = maxf(0.0, screen_shake - delta * 18.0)
 	flash = maxf(0.0, flash - delta * 2.5)
@@ -115,17 +319,20 @@ func update_game(delta: float) -> void:
 	beam_on = Input.is_key_pressed(KEY_SPACE) or Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	beam_on = beam_on and beam_energy > 0.5
 	if beam_on:
-		beam_energy = maxf(0, beam_energy - delta * 25.0)
+		beam_energy = maxf(0, beam_energy - delta * LEVEL_DRAIN[level - 1])
 	else:
 		beam_energy = minf(100, beam_energy + delta * 18.0)
 
 	spawn_timer -= delta
-	if spawn_timer <= 0 and cows.size() < 10:
+	if spawn_timer <= 0 and cows.size() < LEVEL_MAX_COWS[level - 1]:
 		spawn_cow()
-		spawn_timer = rng.randf_range(1.5, 3.0)
+		spawn_timer = rng.randf_range(LEVEL_SPAWN_MIN[level - 1], LEVEL_SPAWN_MAX[level - 1])
 
 	for cow in cows:
 		update_cow(cow, delta)
+
+	if boss_active:
+		update_boss(delta)
 
 	for i in range(cows.size() - 1, -1, -1):
 		if cows[i].captured:
@@ -149,7 +356,14 @@ func update_cow(cow: Dictionary, delta: float) -> void:
 		if cow.airborne:
 			cow.vel.y += 420.0 * delta
 		else:
-			cow.vel.x = move_toward(cow.vel.x, cow.dir * 25.0, delta * 20.0)
+			var wander: float = float(cow.dir) * LEVEL_SPEED[level - 1]
+			if boss_active:
+				var cpos: Vector2 = cow.pos
+				var bpos: Vector2 = boss.pos
+				if cpos.distance_to(bpos) < 210:
+					cow.fear = minf(1.0, float(cow.fear) + delta * 3.5)
+					wander = signf(cpos.x - bpos.x) * LEVEL_SPEED[level - 1] * 2.4
+			cow.vel.x = move_toward(float(cow.vel.x), wander, delta * 35.0)
 			if rng.randf() < delta * 0.25:
 				cow.dir *= -1.0
 
@@ -170,7 +384,12 @@ func update_cow(cow: Dictionary, delta: float) -> void:
 
 	if cow.pos.distance_to(ufo_pos) < 48:
 		cow.captured = true
+		if not note_players.is_empty():
+			var ni := int(cow.note) % note_players.size()
+			note_players[ni].stop()
+			note_players[ni].play()
 		captured += 1
+		level_captured += 1
 		combo += 1
 		best_combo = maxi(best_combo, combo)
 		var points := 100 * combo
@@ -181,6 +400,10 @@ func update_cow(cow: Dictionary, delta: float) -> void:
 		flash = 0.35
 		for j in 18:
 			add_particle(ufo_pos + Vector2(rng.randf_range(-35, 35), 15), Color("#d7ff75"), "burst")
+		if level_captured >= LEVEL_TARGETS[level - 1]:
+			state = GameState.LEVEL_COMPLETE
+			level_complete_timer = 2.5
+			beam_on = false
 	elif not in_beam and cow.airborne and cow.pos.y >= GROUND_Y - 17:
 		combo = 0
 
@@ -218,6 +441,8 @@ func _draw() -> void:
 	draw_background()
 	for cow in cows:
 		draw_cow(cow)
+	if boss_active:
+		draw_boss()
 	if state == GameState.PLAYING and beam_on:
 		draw_beam()
 	draw_ufo(ufo_pos, state == GameState.TITLE)
@@ -228,6 +453,8 @@ func _draw() -> void:
 		draw_title()
 	elif state == GameState.PLAYING:
 		draw_hud()
+	elif state == GameState.LEVEL_COMPLETE:
+		draw_level_complete()
 	else:
 		draw_game_over()
 	if flash > 0:
@@ -339,6 +566,10 @@ func draw_cow(cow: Dictionary) -> void:
 	if cow.fear > 0.2:
 		draw_circle(Vector2(28, -8), 5, Color.WHITE, false, 1.5)
 	draw_set_transform(Vector2.ZERO)
+	var nc: Color = NOTE_COLORS[int(cow.note) % NOTE_COLORS.size()]
+	var dot_r: float = 5.0 + float(cow.fear) * 3.0
+	draw_circle(p + Vector2(0, -44), dot_r + 2.5, Color(nc, 0.25))
+	draw_circle(p + Vector2(0, -44), dot_r, nc)
 
 func draw_custom_ellipse(center: Vector2, radii: Vector2, color: Color) -> void:
 	var points := PackedVector2Array()
@@ -356,17 +587,21 @@ func draw_title() -> void:
 	draw_panel(Rect2(286, 75, 580, 470), Color(0.025, 0.07, 0.14, 0.78))
 	draw_centered("UDDER SPACE", 132, 54, Color("#e8ff77"))
 	draw_centered("A CLOSE ENCOUNTER OF THE HERD KIND", 184, 18, Color("#9ce8d5"))
-	draw_centered("ABDUCT AS MANY COWS AS YOU CAN", 342, 22, Color.WHITE)
+	draw_centered("CLEAR 5 LEVELS  •  ABDUCT THE HERD", 342, 20, Color.WHITE)
 	draw_centered("ARROW KEYS / WASD  •  MOVE", 392, 18, Color("#b8c8cf"))
 	draw_centered("HOLD SPACE OR LEFT CLICK  •  TRACTOR BEAM", 426, 18, Color("#b8c8cf"))
 	var pulse := 0.78 + sin(title_bob * 4) * 0.22
 	draw_centered("PRESS SPACE TO INVADE", 490, 24, Color(0.9, 1, 0.45, pulse))
 
 func draw_hud() -> void:
-	draw_panel(Rect2(25, 22, 315, 72), Color(0.02, 0.06, 0.12, 0.78))
-	draw_text(Vector2(45, 52), "COWS  %02d" % captured, 21, Color("#dffb78"))
-	draw_text(Vector2(190, 52), "SCORE  %06d" % score, 21, Color.WHITE)
+	draw_panel(Rect2(25, 22, 340, 72), Color(0.02, 0.06, 0.12, 0.78))
+	draw_text(Vector2(45, 52), "COWS  %d/%d" % [level_captured, LEVEL_TARGETS[level - 1]], 21, Color("#dffb78"))
+	draw_text(Vector2(210, 52), "SCORE  %06d" % score, 21, Color.WHITE)
 	draw_text(Vector2(45, 80), "COMBO  x%d" % maxi(1, combo), 17, Color("#8fe8d1"))
+	if level == 5:
+		draw_centered("BOSS  STAGE", 46, 22, Color("#ff4422"))
+	else:
+		draw_centered("LEVEL  %d" % level, 46, 22, Color("#e8ff77"))
 	draw_panel(Rect2(W - 260, 22, 235, 72), Color(0.02, 0.06, 0.12, 0.78))
 	draw_text(Vector2(W - 240, 52), "TIME", 18, Color("#9eb4c0"))
 	var time_color := Color("#ff6b69") if time_left < 10 else Color.WHITE
@@ -375,14 +610,31 @@ func draw_hud() -> void:
 	draw_rect(Rect2(W - 180, 69, 125, 12), Color("#20313b"), true)
 	draw_rect(Rect2(W - 178, 71, 121 * beam_energy / 100.0, 8), Color("#caff63"), true)
 
+func draw_level_complete() -> void:
+	draw_panel(Rect2(326, 150, 500, 310), Color(0.025, 0.07, 0.14, 0.92))
+	if level == 5:
+		draw_centered("FINAL LEVEL CLEAR!", 228, 36, Color("#e8ff77"))
+		draw_centered("THE HERD FLIES FREE", 276, 18, Color("#9ce8d5"))
+	else:
+		draw_centered("LEVEL %d COMPLETE" % level, 228, 36, Color("#e8ff77"))
+		draw_centered("LEVEL %d  INCOMING" % (level + 1), 276, 18, Color("#9ce8d5"))
+	draw_centered("%d COWS BEAMED" % level_captured, 318, 20, Color.WHITE)
+	draw_centered("SCORE  %06d" % score, 358, 22, Color("#dffb78"))
+	var pulse := 0.78 + sin(title_bob * 5) * 0.22
+	draw_centered("GET READY...", 420, 20, Color(0.9, 1.0, 0.45, pulse))
+
 func draw_game_over() -> void:
 	draw_panel(Rect2(326, 104, 500, 425), Color(0.025, 0.07, 0.14, 0.9))
-	draw_centered("MISSION COMPLETE", 165, 38, Color("#e8ff77"))
-	draw_centered("THE FARMERS ARE CONFUSED.", 208, 18, Color("#9ce8d5"))
-	draw_centered("%d" % captured, 306, 72, Color.WHITE)
-	draw_centered("COWS LIBERATED", 342, 17, Color("#9eb4c0"))
-	draw_centered("SCORE  %06d" % score, 397, 25, Color("#e8ff77"))
-	draw_centered("BEST COMBO  x%d" % best_combo, 432, 18, Color("#9ce8d5"))
+	if level > 5:
+		draw_centered("ALL 5 LEVELS CLEAR!", 165, 34, Color("#e8ff77"))
+		draw_centered("THE HERD IS FREE.", 208, 18, Color("#9ce8d5"))
+	else:
+		draw_centered("MISSION COMPLETE", 165, 38, Color("#e8ff77"))
+		draw_centered("LEVEL %d  •  TIME'S UP" % level, 208, 18, Color("#9ce8d5"))
+	draw_centered("%d" % captured, 290, 72, Color.WHITE)
+	draw_centered("COWS LIBERATED", 330, 17, Color("#9eb4c0"))
+	draw_centered("SCORE  %06d" % score, 385, 25, Color("#e8ff77"))
+	draw_centered("BEST COMBO  x%d" % best_combo, 420, 18, Color("#9ce8d5"))
 	draw_centered("PRESS SPACE TO RAID AGAIN", 490, 21, Color.WHITE)
 
 func draw_panel(rect: Rect2, color: Color) -> void:
