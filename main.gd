@@ -6,12 +6,13 @@ const GROUND_Y := 535.0
 const UFO_SPEED := 430.0
 const BEAM_RANGE := 365.0
 
-enum GameState { TITLE, PLAYING, GAME_OVER }
+enum GameState { TITLE, PLAYING, LEVEL_UP, GAME_OVER }
 
 var state := GameState.TITLE
 var ufo_pos := Vector2(W * 0.5, 170.0)
 var ufo_vel := Vector2.ZERO
-var cows: Array[Dictionary] = []
+var pigeons: Array[Dictionary] = []
+var lasers: Array[Dictionary] = []
 var particles: Array[Dictionary] = []
 var stars: Array[Vector2] = []
 var clouds: Array[Dictionary] = []
@@ -23,8 +24,12 @@ var beam_energy := 100.0
 var beam_on := false
 var screen_shake := 0.0
 var flash := 0.0
+var hit_flash := 0.0
 var spawn_timer := 0.0
 var captured := 0
+var level := 1
+var level_captured := 0
+var level_up_timer := 0.0
 var title_bob := 0.0
 var rng := RandomNumberGenerator.new()
 
@@ -44,31 +49,48 @@ func start_game() -> void:
 	state = GameState.PLAYING
 	ufo_pos = Vector2(W * 0.5, 155)
 	ufo_vel = Vector2.ZERO
-	cows.clear()
+	pigeons.clear()
+	lasers.clear()
 	particles.clear()
 	score = 0
 	combo = 0
 	best_combo = 0
 	captured = 0
+	level = 1
+	level_captured = 0
 	time_left = 60.0
 	beam_energy = 100.0
 	spawn_timer = 0.0
 	for i in 8:
-		spawn_cow(90.0 + i * 135.0 + rng.randf_range(-30, 30))
+		spawn_pigeon(90.0 + i * 135.0 + rng.randf_range(-30, 30))
 
-func spawn_cow(x := -1.0) -> void:
+func spawn_pigeon(x := -1.0) -> void:
 	if x < 0:
 		x = rng.randf_range(65, W - 65)
-	cows.append({
+	pigeons.append({
 		"pos": Vector2(x, GROUND_Y - 16),
 		"vel": Vector2(rng.randf_range(-24, 24), 0),
 		"dir": -1.0 if rng.randf() < 0.5 else 1.0,
 		"phase": rng.randf_range(0, TAU),
 		"fear": 0.0,
 		"airborne": false,
+		"flying": false,
+		"fly_timer": 0.0,
+		"fly_target_y": GROUND_Y - 16,
 		"captured": false,
-		"size": rng.randf_range(0.88, 1.1)
+		"size": rng.randf_range(0.88, 1.1),
+		"shoot_timer": rng.randf_range(2.0, 5.0)
 	})
+
+func start_level_up() -> void:
+	level += 1
+	level_captured = 0
+	level_up_timer = 2.5
+	time_left = minf(99.0, time_left + 15.0)
+	beam_on = false
+	state = GameState.LEVEL_UP
+	pigeons.clear()
+	lasers.clear()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -90,6 +112,12 @@ func _process(delta: float) -> void:
 			cloud.pos.x = -140
 	if state == GameState.PLAYING:
 		update_game(delta)
+	elif state == GameState.LEVEL_UP:
+		level_up_timer -= delta
+		if level_up_timer <= 0:
+			state = GameState.PLAYING
+			for i in 8:
+				spawn_pigeon(90.0 + i * 135.0 + rng.randf_range(-30, 30))
 	update_particles(delta)
 	screen_shake = maxf(0.0, screen_shake - delta * 18.0)
 	flash = maxf(0.0, flash - delta * 2.5)
@@ -120,60 +148,122 @@ func update_game(delta: float) -> void:
 		beam_energy = minf(100, beam_energy + delta * 18.0)
 
 	spawn_timer -= delta
-	if spawn_timer <= 0 and cows.size() < 10:
-		spawn_cow()
+	if spawn_timer <= 0 and pigeons.size() < 10:
+		spawn_pigeon()
 		spawn_timer = rng.randf_range(1.5, 3.0)
 
-	for cow in cows:
-		update_cow(cow, delta)
+	for pigeon in pigeons:
+		update_pigeon(pigeon, delta)
 
-	for i in range(cows.size() - 1, -1, -1):
-		if cows[i].captured:
-			cows.remove_at(i)
+	for i in range(pigeons.size() - 1, -1, -1):
+		if pigeons[i].captured:
+			pigeons.remove_at(i)
 
-func update_cow(cow: Dictionary, delta: float) -> void:
-	cow.phase += delta * 5.0
-	var offset: Vector2 = cow.pos - ufo_pos
-	var in_beam: bool = beam_on and cow.pos.y > ufo_pos.y and absf(offset.x) < beam_width_at(cow.pos.y) and offset.length() < BEAM_RANGE
+	update_lasers(delta)
+	hit_flash = maxf(0.0, hit_flash - delta * 3.5)
+
+func update_pigeon(pigeon: Dictionary, delta: float) -> void:
+	pigeon.phase += delta * 5.0
+	var offset: Vector2 = pigeon.pos - ufo_pos
+	var in_beam: bool = beam_on and pigeon.pos.y > ufo_pos.y and absf(offset.x) < beam_width_at(pigeon.pos.y) and offset.length() < BEAM_RANGE
+
+	# Dodge UFO: flee when UFO is nearby, triggering flight if on the ground
+	var to_ufo: Vector2 = ufo_pos - pigeon.pos
+	var dist_to_ufo := to_ufo.length()
+	var dodge_range := 240.0 + level * 18.0
+	var flee_base := 270.0 + level * 28.0
+	if not in_beam and dist_to_ufo < dodge_range and dist_to_ufo > 1.0:
+		var flee := -to_ufo.normalized()
+		var flee_strength := (1.0 - dist_to_ufo / dodge_range) * flee_base
+		if beam_on:
+			flee_strength *= 2.5
+		pigeon.vel += flee * flee_strength * delta
+		if absf(flee.x) > 0.1:
+			pigeon.dir = sign(flee.x)
+		pigeon.fear = minf(1.0, pigeon.fear + delta * 3.0)
+		# Take off when UFO is close and pigeon is on the ground
+		var takeoff_chance := 4.0 + level * 0.8
+		if not pigeon.flying and not pigeon.airborne and rng.randf() < delta * takeoff_chance:
+			pigeon.flying = true
+			pigeon.fly_timer = rng.randf_range(2.0, 4.5)
+			pigeon.fly_target_y = rng.randf_range(GROUND_Y - 170.0, GROUND_Y - 65.0)
+			pigeon.vel.y = -200.0
 
 	if in_beam:
-		cow.airborne = true
-		cow.fear = minf(1.0, cow.fear + delta * 4.0)
-		var pull := Vector2((ufo_pos.x - cow.pos.x) * 4.3, -245.0)
-		cow.vel = cow.vel.lerp(pull, 1.0 - exp(-delta * 3.4))
-		cow.vel.y -= delta * 100.0
+		pigeon.flying = false
+		pigeon.airborne = true
+		pigeon.fear = minf(1.0, pigeon.fear + delta * 4.0)
+		var pull := Vector2((ufo_pos.x - pigeon.pos.x) * 4.3, -245.0)
+		pigeon.vel = pigeon.vel.lerp(pull, 1.0 - exp(-delta * 3.4))
+		pigeon.vel.y -= delta * 100.0
 		if rng.randf() < delta * 8.0:
-			add_particle(cow.pos + Vector2(rng.randf_range(-15, 15), 10), Color("#caff70"), "spark")
-	else:
-		cow.fear = maxf(0.0, cow.fear - delta * 2.0)
-		if cow.airborne:
-			cow.vel.y += 420.0 * delta
+			add_particle(pigeon.pos + Vector2(rng.randf_range(-15, 15), 10), Color("#caff70"), "spark")
+	elif pigeon.flying:
+		pigeon.fear = maxf(0.0, pigeon.fear - delta * 1.5)
+		pigeon.fly_timer -= delta
+		if pigeon.fly_timer <= 0:
+			pigeon.flying = false
+			pigeon.airborne = true  # fall to ground naturally
 		else:
-			cow.vel.x = move_toward(cow.vel.x, cow.dir * 25.0, delta * 20.0)
+			# Maintain target altitude and cruise horizontally
+			var dy: float = pigeon.fly_target_y - pigeon.pos.y
+			pigeon.vel.y = move_toward(pigeon.vel.y, dy * 4.5, delta * 380.0)
+			pigeon.vel.x = move_toward(pigeon.vel.x, pigeon.dir * 90.0, delta * 75.0)
+	else:
+		pigeon.fear = maxf(0.0, pigeon.fear - delta * 2.0)
+		if pigeon.airborne:
+			pigeon.vel.y += 420.0 * delta
+		else:
+			var walk_speed := 22.0 + level * 4.0
+			pigeon.vel.x = move_toward(pigeon.vel.x, pigeon.dir * walk_speed, delta * 20.0)
 			if rng.randf() < delta * 0.25:
-				cow.dir *= -1.0
+				pigeon.dir *= -1.0
+			# Occasionally take off on their own
+			var idle_fly_chance := 0.05 + level * 0.012
+			if rng.randf() < delta * idle_fly_chance:
+				pigeon.flying = true
+				pigeon.fly_timer = rng.randf_range(2.0, 5.0)
+				pigeon.fly_target_y = rng.randf_range(GROUND_Y - 150.0, GROUND_Y - 55.0)
+				pigeon.vel.y = -130.0
 
-	cow.pos += cow.vel * delta
-	if cow.pos.y >= GROUND_Y - 16:
-		if cow.airborne and cow.vel.y > 170:
-			for j in 5:
-				add_particle(cow.pos + Vector2(rng.randf_range(-18, 18), 12), Color("#b69568"), "dust")
-		cow.pos.y = GROUND_Y - 16
-		cow.vel.y = 0
-		cow.airborne = false
-	if cow.pos.x < 35:
-		cow.pos.x = 35
-		cow.dir = 1.0
-	if cow.pos.x > W - 35:
-		cow.pos.x = W - 35
-		cow.dir = -1.0
+	pigeon.pos += pigeon.vel * delta
 
-	if cow.pos.distance_to(ufo_pos) < 48:
-		cow.captured = true
+	if pigeon.flying:
+		# Keep flying pigeons within the play area vertically
+		if pigeon.pos.y < 380:
+			pigeon.pos.y = 380
+			pigeon.vel.y = maxf(0.0, pigeon.vel.y)
+	else:
+		if pigeon.pos.y >= GROUND_Y - 16:
+			if pigeon.airborne and pigeon.vel.y > 170:
+				for j in 5:
+					add_particle(pigeon.pos + Vector2(rng.randf_range(-18, 18), 12), Color("#b69568"), "dust")
+			pigeon.pos.y = GROUND_Y - 16
+			pigeon.vel.y = 0
+			pigeon.airborne = false
+
+	if pigeon.pos.x < 35:
+		pigeon.pos.x = 35
+		pigeon.dir = 1.0
+	if pigeon.pos.x > W - 35:
+		pigeon.pos.x = W - 35
+		pigeon.dir = -1.0
+
+	if not in_beam:
+		pigeon.shoot_timer -= delta
+		if pigeon.shoot_timer <= 0:
+			var interval_min: float = maxf(0.7, 2.2 - level * 0.18)
+			var interval_max: float = maxf(1.2, 4.0 - level * 0.28)
+			pigeon.shoot_timer = rng.randf_range(interval_min, interval_max)
+			shoot_laser(pigeon)
+
+	if pigeon.pos.distance_to(ufo_pos) < 48:
+		pigeon.captured = true
 		captured += 1
+		level_captured += 1
 		combo += 1
 		best_combo = maxi(best_combo, combo)
-		var points := 100 * combo
+		var points := 100 * combo * level
 		score += points
 		time_left = minf(99.0, time_left + 2.0)
 		beam_energy = minf(100, beam_energy + 22)
@@ -181,8 +271,33 @@ func update_cow(cow: Dictionary, delta: float) -> void:
 		flash = 0.35
 		for j in 18:
 			add_particle(ufo_pos + Vector2(rng.randf_range(-35, 35), 15), Color("#d7ff75"), "burst")
-	elif not in_beam and cow.airborne and cow.pos.y >= GROUND_Y - 17:
+		if level_captured >= 10:
+			start_level_up()
+	elif not in_beam and pigeon.airborne and pigeon.pos.y >= GROUND_Y - 17:
 		combo = 0
+
+func shoot_laser(pigeon: Dictionary) -> void:
+	var origin: Vector2 = pigeon.pos + Vector2(0, -8)
+	var dir := (ufo_pos - origin).normalized()
+	lasers.append({
+		"pos": origin,
+		"vel": dir * 510.0,
+		"life": 1.5
+	})
+
+func update_lasers(delta: float) -> void:
+	for laser in lasers:
+		laser.pos += laser.vel * delta
+		laser.life -= delta
+		if (laser.pos as Vector2).distance_to(ufo_pos) < 54:
+			laser.life = 0.0
+			beam_energy = maxf(0.0, beam_energy - 18.0)
+			screen_shake = maxf(screen_shake, 4.5)
+			hit_flash = 0.45
+			add_particle(ufo_pos + Vector2(rng.randf_range(-25, 25), 8), Color("#ff40a0"), "spark")
+	for i in range(lasers.size() - 1, -1, -1):
+		if lasers[i].life <= 0:
+			lasers.remove_at(i)
 
 func beam_width_at(y: float) -> float:
 	var t := clampf((y - ufo_pos.y) / BEAM_RANGE, 0, 1)
@@ -216,8 +331,9 @@ func _draw() -> void:
 		shake = Vector2(rng.randf_range(-screen_shake, screen_shake), rng.randf_range(-screen_shake, screen_shake))
 	draw_set_transform(shake)
 	draw_background()
-	for cow in cows:
-		draw_cow(cow)
+	for pigeon in pigeons:
+		draw_pigeon(pigeon)
+	draw_lasers()
 	if state == GameState.PLAYING and beam_on:
 		draw_beam()
 	draw_ufo(ufo_pos, state == GameState.TITLE)
@@ -228,10 +344,15 @@ func _draw() -> void:
 		draw_title()
 	elif state == GameState.PLAYING:
 		draw_hud()
+	elif state == GameState.LEVEL_UP:
+		draw_hud()
+		draw_level_up()
 	else:
 		draw_game_over()
 	if flash > 0:
 		draw_rect(Rect2(0, 0, W, H), Color(0.8, 1.0, 0.65, flash), true)
+	if hit_flash > 0:
+		draw_rect(Rect2(0, 0, W, H), Color(1.0, 0.1, 0.25, hit_flash * 0.35), true)
 
 func draw_background() -> void:
 	draw_rect(Rect2(0, 0, W, H), Color("#08152f"), true)
@@ -315,29 +436,72 @@ func draw_ufo(pos: Vector2, title_mode := false) -> void:
 		draw_circle(p + Vector2(lx, 10), 4.5, lc)
 	draw_line(p + Vector2(-26, 22), p + Vector2(26, 22), Color("#c9ff6a"), 4)
 
-func draw_cow(cow: Dictionary) -> void:
-	var p: Vector2 = cow.pos
-	var s: float = cow.size
-	var angle := clampf(cow.vel.x / 500.0, -0.35, 0.35)
-	if cow.airborne:
-		angle += sin(cow.phase) * 0.12
+func draw_pigeon(pigeon: Dictionary) -> void:
+	var p: Vector2 = pigeon.pos
+	var s: float = pigeon.size
+	var angle := clampf(pigeon.vel.x / 500.0, -0.35, 0.35)
+	if pigeon.airborne:
+		angle += sin(pigeon.phase) * 0.12
 	draw_set_transform(p, angle, Vector2(s, s))
-	var body := Color("#f4eee2")
-	var dark := Color("#252733")
-	draw_custom_ellipse(Vector2.ZERO, Vector2(27, 16), body)
-	draw_circle(Vector2(25, -5), 12, body)
-	draw_circle(Vector2(31, -4), 5, Color("#e7b7a8"))
-	draw_colored_polygon(PackedVector2Array([Vector2(17, -14), Vector2(12, -24), Vector2(22, -17)]), dark)
-	draw_colored_polygon(PackedVector2Array([Vector2(31, -14), Vector2(38, -23), Vector2(37, -12)]), dark)
-	draw_custom_ellipse(Vector2(-10, -5), Vector2(9, 7), dark)
-	draw_custom_ellipse(Vector2(9, 7), Vector2(7, 6), dark)
-	var leg_kick := sin(cow.phase) * (7 if cow.airborne else 2)
-	draw_line(Vector2(-15, 12), Vector2(-16 + leg_kick, 27), dark, 5)
-	draw_line(Vector2(13, 12), Vector2(14 - leg_kick, 27), dark, 5)
-	draw_line(Vector2(-26, -4), Vector2(-34, -14 + sin(cow.phase) * 4), dark, 3)
-	draw_circle(Vector2(28, -8), 2.3, Color("#10151d"))
-	if cow.fear > 0.2:
-		draw_circle(Vector2(28, -8), 5, Color.WHITE, false, 1.5)
+
+	var body_col := Color("#9aa2ac")
+	var wing_col := Color("#7a8090")
+	var head_col := Color("#5c6270")
+	var dark_col := Color("#3a3e4c")
+
+	var flap := 0.0
+	if pigeon.flying:
+		flap = sin(pigeon.phase * 2.5) * 15.0
+	elif pigeon.airborne:
+		flap = sin(pigeon.phase * 2.0) * 11.0
+
+	if pigeon.flying:
+		# Both wings visible and beating
+		draw_colored_polygon(PackedVector2Array([
+			Vector2(-2, 2.0 - flap), Vector2(16, -6.0 - flap), Vector2(20, 3)
+		]), wing_col)
+		draw_colored_polygon(PackedVector2Array([
+			Vector2(-2, 5.0 + flap * 0.5), Vector2(16, 11.0 + flap * 0.5), Vector2(20, 3)
+		]), Color("#687078"))
+	else:
+		# Single folded wing tip
+		draw_colored_polygon(PackedVector2Array([
+			Vector2(-4, 2.0 - flap), Vector2(14, -4.0 - flap), Vector2(18, 3)
+		]), wing_col)
+
+	# Body
+	draw_custom_ellipse(Vector2(1, 3), Vector2(24, 13), body_col)
+
+	# Tail feathers
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-19, 1), Vector2(-32, 9), Vector2(-32, 14), Vector2(-19, 11)
+	]), dark_col)
+
+	# Head
+	draw_circle(Vector2(22, -8), 11, head_col)
+
+	# Iridescent neck patch
+	draw_custom_ellipse(Vector2(14, -1), Vector2(7, 5), Color("#50b882", 0.45))
+
+	# Beak
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(30, -9), Vector2(39, -8), Vector2(30, -6)
+	]), Color("#dc9828"))
+
+	# Legs
+	var leg_kick := sin(pigeon.phase) * (5 if pigeon.airborne else 2)
+	draw_line(Vector2(-5, 15), Vector2(-6 + leg_kick, 27), dark_col, 3)
+	draw_line(Vector2(9, 15), Vector2(10 - leg_kick, 27), dark_col, 3)
+	# Feet
+	draw_line(Vector2(-9 + leg_kick, 27), Vector2(-2 + leg_kick, 27), dark_col, 2)
+	draw_line(Vector2(7 - leg_kick, 27), Vector2(14 - leg_kick, 27), dark_col, 2)
+
+	# Eye with orange iris ring (pigeons have orange eyes)
+	draw_circle(Vector2(24, -9), 4.0, Color("#e06020"))
+	draw_circle(Vector2(24, -9), 2.5, Color("#10151d"))
+	if pigeon.fear > 0.2:
+		draw_circle(Vector2(24, -9), 6, Color.WHITE, false, 1.5)
+
 	draw_set_transform(Vector2.ZERO)
 
 func draw_custom_ellipse(center: Vector2, radii: Vector2, color: Color) -> void:
@@ -352,11 +516,21 @@ func draw_particle(p: Dictionary) -> void:
 	var radius := 3.0 if p.kind == "dust" else 4.0
 	draw_circle(p.pos, radius * alpha + 1, Color(p.color, alpha))
 
+func draw_lasers() -> void:
+	for laser in lasers:
+		var alpha := clampf((laser.life as float) * 2.2, 0.0, 1.0)
+		var lpos := laser.pos as Vector2
+		var lvel := laser.vel as Vector2
+		var tail := lpos - lvel.normalized() * 18.0
+		draw_line(tail, lpos, Color(1.0, 0.2, 0.7, alpha * 0.45), 6)
+		draw_line(tail, lpos, Color(1.0, 0.5, 0.9, alpha), 2)
+		draw_circle(lpos, 3.5, Color(1.0, 0.8, 1.0, alpha))
+
 func draw_title() -> void:
 	draw_panel(Rect2(286, 75, 580, 470), Color(0.025, 0.07, 0.14, 0.78))
-	draw_centered("UDDER SPACE", 132, 54, Color("#e8ff77"))
-	draw_centered("A CLOSE ENCOUNTER OF THE HERD KIND", 184, 18, Color("#9ce8d5"))
-	draw_centered("ABDUCT AS MANY COWS AS YOU CAN", 342, 22, Color.WHITE)
+	draw_centered("PIGEON SPACE", 132, 54, Color("#e8ff77"))
+	draw_centered("A CLOSE ENCOUNTER OF THE BIRD KIND", 184, 18, Color("#9ce8d5"))
+	draw_centered("ABDUCT AS MANY PIGEONS AS YOU CAN", 342, 22, Color.WHITE)
 	draw_centered("ARROW KEYS / WASD  •  MOVE", 392, 18, Color("#b8c8cf"))
 	draw_centered("HOLD SPACE OR LEFT CLICK  •  TRACTOR BEAM", 426, 18, Color("#b8c8cf"))
 	var pulse := 0.78 + sin(title_bob * 4) * 0.22
@@ -364,9 +538,10 @@ func draw_title() -> void:
 
 func draw_hud() -> void:
 	draw_panel(Rect2(25, 22, 315, 72), Color(0.02, 0.06, 0.12, 0.78))
-	draw_text(Vector2(45, 52), "COWS  %02d" % captured, 21, Color("#dffb78"))
+	draw_text(Vector2(45, 52), "BIRDS  %02d" % captured, 21, Color("#dffb78"))
 	draw_text(Vector2(190, 52), "SCORE  %06d" % score, 21, Color.WHITE)
 	draw_text(Vector2(45, 80), "COMBO  x%d" % maxi(1, combo), 17, Color("#8fe8d1"))
+	draw_text(Vector2(205, 80), "LVL %d  (%d/10)" % [level, level_captured], 15, Color("#9eb4c0"))
 	draw_panel(Rect2(W - 260, 22, 235, 72), Color(0.02, 0.06, 0.12, 0.78))
 	draw_text(Vector2(W - 240, 52), "TIME", 18, Color("#9eb4c0"))
 	var time_color := Color("#ff6b69") if time_left < 10 else Color.WHITE
@@ -375,12 +550,20 @@ func draw_hud() -> void:
 	draw_rect(Rect2(W - 180, 69, 125, 12), Color("#20313b"), true)
 	draw_rect(Rect2(W - 178, 71, 121 * beam_energy / 100.0, 8), Color("#caff63"), true)
 
+func draw_level_up() -> void:
+	var pulse := 0.82 + sin(title_bob * 6.0) * 0.18
+	draw_panel(Rect2(326, 185, 500, 265), Color(0.02, 0.07, 0.16, 0.93))
+	draw_centered("LEVEL %d" % level, 268, 68, Color("#e8ff77"))
+	draw_centered("10 PIGEONS ABDUCTED!", 342, 20, Color("#9ce8d5"))
+	draw_centered("+15 SECONDS", 374, 18, Color("#caff63"))
+	draw_centered("GET READY...", 418, 20, Color(1.0, 1.0, 1.0, pulse))
+
 func draw_game_over() -> void:
 	draw_panel(Rect2(326, 104, 500, 425), Color(0.025, 0.07, 0.14, 0.9))
 	draw_centered("MISSION COMPLETE", 165, 38, Color("#e8ff77"))
-	draw_centered("THE FARMERS ARE CONFUSED.", 208, 18, Color("#9ce8d5"))
+	draw_centered("REACHED LEVEL %d" % level, 208, 18, Color("#9ce8d5"))
 	draw_centered("%d" % captured, 306, 72, Color.WHITE)
-	draw_centered("COWS LIBERATED", 342, 17, Color("#9eb4c0"))
+	draw_centered("PIGEONS LIBERATED", 342, 17, Color("#9eb4c0"))
 	draw_centered("SCORE  %06d" % score, 397, 25, Color("#e8ff77"))
 	draw_centered("BEST COMBO  x%d" % best_combo, 432, 18, Color("#9ce8d5"))
 	draw_centered("PRESS SPACE TO RAID AGAIN", 490, 21, Color.WHITE)
